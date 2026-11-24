@@ -23,6 +23,11 @@ python -m uvicorn app:app --app-dir backend --reload --port 8000
 
 静态页仍由 FastAPI 托管于同一进程。
 
+## 无提单禁建门闸
+
+提单册无匹配行时过磅写口正式册零增并拒收（甲路径，当日封死），详见
+[无提单禁建说明](docs/无提单禁建说明.md)。
+
 ## 自测
 
 ```powershell

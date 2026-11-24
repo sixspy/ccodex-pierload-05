@@ -2,6 +2,7 @@ export const blViewTemplate = `
 <section class="panel">
   <h2>提单册</h2>
   <p class="hint">到港提单须先登记，过磅票引用提单号。</p>
+  <p class="hint" style="color:#e8b34b">无提单禁建门闸（甲路径·当日封死）：提单册无匹配行时，过磅写口正式册零增并拒收，不设影子票、不设晋升；双会话同提单号抢建占提单锁，后到只留争用痕。</p>
   <div class="form-row">
     <div><label>提单号</label><input v-model="blForm.bl_code"/></div>
     <div><label>货描</label><input v-model="blForm.cargo_desc"/></div>

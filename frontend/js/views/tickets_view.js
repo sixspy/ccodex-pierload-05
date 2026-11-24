@@ -2,6 +2,7 @@ export const ticketsViewTemplate = `
 <section class="panel">
   <h2>过磅票采集</h2>
   <p class="hint">录入各轴重 JSON；超重自动旁路挂起并开超重记录。</p>
+  <p class="hint" style="color:#e8b34b">无提单禁建门闸：提单号仅可取自提单册已登记行；提单册无匹配行时正式册零增并拒收（后端门闸同源，前端禁建仅为联动）。</p>
   <div class="form-row">
     <div><label>车道</label>
       <select v-model.number="ticketForm.lane_id">
@@ -19,9 +20,10 @@ export const ticketsViewTemplate = `
   <label>轴重 JSON</label>
   <textarea v-model="ticketForm.axles_json" rows="4" placeholder='[{"axle":1,"w":8.2}]'></textarea>
   <div class="actions">
-    <button @click="createTicket">过磅入闸</button>
+    <button @click="createTicket" :disabled="!blList.length">过磅入闸</button>
     <button class="secondary" @click="refresh">刷新</button>
   </div>
+  <p v-if="!blList.length" class="action-err">提单册无登记提单，禁建正式票；请先到提单页登记提单。</p>
   <table class="data-table">
     <thead><tr><th>票号</th><th>车道</th><th>提单</th><th>毛重</th><th>状态</th><th>代</th><th></th></tr></thead>
     <tbody>

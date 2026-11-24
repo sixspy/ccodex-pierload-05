@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +37,31 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    # WAL：读写不互斥，但写与写仍在库级串行，配合 BEGIN IMMEDIATE 保证
+    # 双会话同提单号抢建时锁插入对另一连接即时可见。
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+@contextmanager
+def write_tx(conn: sqlite3.Connection):
+    """显式立即写事务：进入即拿 RESERVED 写锁，跨连接串行。
+
+    Python sqlite3 默认 deferred 事务在首次 DML 前不占写锁，且锁行与
+    业务写同事务未提交时对其他连接不可见，无法支撑提单锁争用判定。
+    回滚后显式 BEGIN 再 commit 复位自动提交态：否则连接滞留事务态，
+    随后 release() 的 DELETE 会被下一次回滚误清，吞掉已提交的争用痕。
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        conn.execute("BEGIN")
+        conn.commit()
+        raise
 
 
 def sha_password(password: str) -> str:
@@ -90,7 +115,8 @@ CREATE TABLE IF NOT EXISTS weigh_tickets(
   status TEXT NOT NULL,
   adjudicated_at TEXT,
   created_at TEXT NOT NULL,
-  FOREIGN KEY(lane_id) REFERENCES weigh_lanes(id)
+  FOREIGN KEY(lane_id) REFERENCES weigh_lanes(id),
+  FOREIGN KEY(bl_ref) REFERENCES bl_manifests(bl_code)
 );
 CREATE TABLE IF NOT EXISTS overload_holds(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,6 +310,12 @@ def seed_tickets(conn: sqlite3.Connection) -> None:
         lane = _lane_id(conn, row["lane_code"])
         if not lane:
             continue
+        # 无提单禁建门闸（甲路径，唯一写入口径）：种子写路径同口径，
+        # 提单册无匹配行一律不得写入正式册，否则提单页空而对账计在港毛重。
+        if not conn.execute(
+            "SELECT bl_code FROM bl_manifests WHERE bl_code=?", (row["bl_ref"],)
+        ).fetchone():
+            continue
         axles = row.get("axle_weights", [])
         gross = float(row.get("gross_t", sum(float(a.get("w", 0)) for a in axles)))
         conn.execute(
@@ -436,9 +468,58 @@ def seed_lineage_samples(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_ticket_bl_fk(conn: sqlite3.Connection) -> None:
+    """无提单禁建门闸：为存量正式册补 bl_ref 外键。
+
+    SQLite 无法 ALTER TABLE 加外键，按官方 12 步重建表。门闸上线前正式册
+    不允许存在无提单孤儿票（seed_tickets 同口径拦截），故重建后行不丢。
+    重建期间必须临时关闭 foreign_keys（DROP/RENAME 会触发关联校验）。
+    """
+    fks = conn.execute("PRAGMA foreign_key_list(weigh_tickets)").fetchall()
+    if any(dict(fk).get("table") == "bl_manifests" for fk in fks):
+        return
+    fk_was_on = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE weigh_tickets_new(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              ticket_code TEXT UNIQUE NOT NULL,
+              lane_id INTEGER NOT NULL,
+              bl_ref TEXT NOT NULL,
+              vehicle_plate TEXT NOT NULL,
+              axle_weights TEXT NOT NULL,
+              gross_t REAL NOT NULL,
+              generation INTEGER NOT NULL DEFAULT 1,
+              status TEXT NOT NULL,
+              adjudicated_at TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(lane_id) REFERENCES weigh_lanes(id),
+              FOREIGN KEY(bl_ref) REFERENCES bl_manifests(bl_code)
+            );
+            INSERT INTO weigh_tickets_new
+              SELECT id,ticket_code,lane_id,bl_ref,vehicle_plate,axle_weights,gross_t,
+                     generation,status,adjudicated_at,created_at
+              FROM weigh_tickets;
+            DROP TABLE weigh_tickets;
+            ALTER TABLE weigh_tickets_new RENAME TO weigh_tickets;
+            """
+        )
+    finally:
+        conn.execute(f"PRAGMA foreign_keys={'ON' if fk_was_on else 'OFF'}")
+    # 重建后复检全库引用完整性，有违例即显性失败，绝不静默带病上线
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise sqlite3.IntegrityError(
+            f"无提单禁建迁移发现外键违例: {[tuple(v) for v in violations]}"
+        )
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate_ticket_bl_fk(conn)
         seed_users(conn)
         seed_bridges(conn)
         seed_lanes(conn)

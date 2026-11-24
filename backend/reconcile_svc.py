@@ -42,9 +42,13 @@ def _reconcile_bl(conn, bl_code: str) -> dict:
     bl = conn.execute(
         "SELECT * FROM bl_manifests WHERE bl_code=?", (bl_code,)
     ).fetchone()
+    # 无提单禁建门闸：对账只统计与提单册同源 JOIN 的正式票，
+    # 任何无提单孤儿票（门闸已三层拦截）都不可能计入在港毛重。
     tickets = conn.execute(
-        """SELECT ticket_code, gross_t, status, generation FROM weigh_tickets
-           WHERE bl_ref=? AND status NOT IN ('作废')""",
+        """SELECT t.ticket_code, t.gross_t, t.status, t.generation
+           FROM weigh_tickets t
+           JOIN bl_manifests m ON m.bl_code=t.bl_ref
+           WHERE t.bl_ref=? AND t.status NOT IN ('作废')""",
         (bl_code,),
     ).fetchall()
     if not tickets:

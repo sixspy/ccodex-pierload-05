@@ -20,18 +20,22 @@ def try_acquire(conn, lock_key: str, holder: str) -> bool:
     row = conn.execute(
         "SELECT holder FROM pier_locks WHERE lock_key=?", (lock_key,)
     ).fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO pier_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
-            (lock_key, holder, now),
-        )
+    if row is not None and row["holder"] == holder:
         return True
-    if row["holder"] == holder:
+    # 单语句抢占：并发双请求下同键只有一条 INSERT 落地，避免先查后插竞态
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO pier_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
+        (lock_key, holder, now),
+    )
+    if cur.rowcount == 1:
         return True
+    owner = conn.execute(
+        "SELECT holder FROM pier_locks WHERE lock_key=?", (lock_key,)
+    ).fetchone()
     conn.execute(
         """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
            VALUES (?,?,?,?,?)""",
-        (lock_key, holder, "争用", f"持有者={row['holder']}", now),
+        (lock_key, holder, "争用", f"持有者={owner['holder'] if owner else '未知'}", now),
     )
     return False
 
